@@ -284,10 +284,7 @@ def agent(obs):
         all_options.sort(key=lambda x: x[0], reverse=True)
 
         committed = {}
-        if step < 60:
-            max_targets = max(4, len(my_planets))
-        else:
-            max_targets = max(4, len(my_planets) * 2 // 3)
+        max_targets = max(3, len(my_planets) // 2)
         distinct_targets = set()
 
         for roi, mp, target, d, needed, tgt_x, tgt_y in all_options:
@@ -316,10 +313,7 @@ def agent(obs):
                 reserve = max(reserve, int(avail * 0.5))
 
             can_send = avail - reserve
-            if step < 60 and target.owner == -1:
-                min_fleet = 3
-            else:
-                min_fleet = max(5, int(d * 0.15))
+            min_fleet = max(5, int(d * 0.15))
             if can_send < min_fleet:
                 continue
 
@@ -335,75 +329,6 @@ def agent(obs):
             available[mp.id] -= send
             committed[target.id] = already_committed + send
             distinct_targets.add(target.id)
-
-        # === MOP-UP: idle planets attack nearest cheap target ===
-        for mp in my_planets:
-            avail = available.get(mp.id, 0)
-            if avail < 8:
-                continue
-            reserve = max(mp.production * 2, 5)
-            can_send = avail - reserve
-            if can_send < 5:
-                continue
-            best_target = None
-            best_cost = float('inf')
-            for tid, (t, static, init_p) in target_info.items():
-                d = dist(mp.x, mp.y, t.x, t.y)
-                if d > 40:
-                    continue
-                garrison = t.ships
-                if t.owner >= 0:
-                    tt = travel_turns(d, can_send)
-                    garrison += int(t.production * (tt + 1))
-                already_there = en_route.get(t.id, 0) + committed.get(t.id, 0)
-                needed = max(0, garrison - already_there) + 2
-                if needed <= 0 or needed > can_send:
-                    continue
-                cost = needed + d * 0.5
-                if cost < best_cost:
-                    best_cost = cost
-                    best_target = (t, d, needed)
-            if best_target:
-                t, d, needed = best_target
-                a = safe_angle(mp.x, mp.y, mp.radius, t.x, t.y)
-                if a is not None:
-                    send = min(can_send, max(needed, 5))
-                    moves.append([mp.id, a, send])
-                    available[mp.id] -= send
-                    committed[t.id] = committed.get(t.id, 0) + send
-
-        # === REDISTRIBUTE: idle planets forward ships to front-line ===
-        if step > 40 and len(my_planets) > 3:
-            enemy_cx = 0.0
-            enemy_cy = 0.0
-            enemy_count = 0
-            for p in planets:
-                if p.owner >= 0 and p.owner != player:
-                    enemy_cx += p.x
-                    enemy_cy += p.y
-                    enemy_count += 1
-            if enemy_count > 0:
-                enemy_cx /= enemy_count
-                enemy_cy /= enemy_count
-
-                for mp in my_planets:
-                    avail = available.get(mp.id, 0)
-                    if avail < 15:
-                        continue
-                    my_d_to_enemy = dist(mp.x, mp.y, enemy_cx, enemy_cy)
-                    closer = [o for o in my_planets if o.id != mp.id
-                              and dist(o.x, o.y, enemy_cx, enemy_cy) < my_d_to_enemy - 10]
-                    if not closer:
-                        continue
-                    best_fwd = min(closer, key=lambda o: dist(o.x, o.y, enemy_cx, enemy_cy))
-                    reserve = max(mp.production * 3, 10)
-                    send = avail - reserve
-                    if send < 10:
-                        continue
-                    a = safe_angle(mp.x, mp.y, mp.radius, best_fwd.x, best_fwd.y)
-                    if a is not None:
-                        moves.append([mp.id, a, send])
-                        available[mp.id] -= send
 
         # Validate moves
         result = []

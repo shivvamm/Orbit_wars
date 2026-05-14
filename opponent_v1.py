@@ -73,45 +73,42 @@ def safe_angle(sx, sy, sr, tx, ty):
     return None
 
 
-def fleet_target(fx, fy, angle, ships, planets, max_t=60):
-    spd = fleet_speed(ships)
-    ca, sa = math.cos(angle), math.sin(angle)
-    best_proj = float('inf')
-    best_pid = None
-    for p in planets:
-        dx, dy = p.x - fx, p.y - fy
-        proj = dx * ca + dy * sa
-        if proj <= 0 or proj >= best_proj:
-            continue
-        perp = abs(dx * sa - dy * ca)
-        if perp < p.radius + 1.0:
-            eta = max(1, int(proj / spd))
-            if eta <= max_t:
-                best_proj = proj
-                best_pid = p.id
-                best_eta = eta
-    if best_pid is not None:
-        return best_pid, best_eta
-    return None, None
-
-
 def fleets_en_route(my_fleets, planets):
     targeted = {}
     for f in my_fleets:
-        pid, _ = fleet_target(f.x, f.y, f.angle, f.ships, planets)
-        if pid is not None:
-            targeted[pid] = targeted.get(pid, 0) + f.ships
+        spd = fleet_speed(f.ships)
+        ca, sa = math.cos(f.angle), math.sin(f.angle)
+        for t in range(1, 50):
+            fx = f.x + ca * spd * t
+            fy = f.y + sa * spd * t
+            if not (0 <= fx <= BOARD_SIZE and 0 <= fy <= BOARD_SIZE):
+                break
+            for p in planets:
+                if dist(fx, fy, p.x, p.y) < p.radius + 1.5:
+                    targeted[p.id] = targeted.get(p.id, 0) + f.ships
+                    break
+            else:
+                continue
+            break
     return targeted
 
 
 def incoming_threats(enemy_fleets, my_planets):
     threats = {}
     for ef in enemy_fleets:
-        pid, eta = fleet_target(ef.x, ef.y, ef.angle, ef.ships, my_planets, max_t=30)
-        if pid is not None:
-            if pid not in threats:
-                threats[pid] = []
-            threats[pid].append((ef.ships, eta))
+        spd = fleet_speed(ef.ships)
+        ca, sa = math.cos(ef.angle), math.sin(ef.angle)
+        for mp in my_planets:
+            for t in range(1, 25):
+                fx = ef.x + ca * spd * t
+                fy = ef.y + sa * spd * t
+                if not (0 <= fx <= BOARD_SIZE and 0 <= fy <= BOARD_SIZE):
+                    break
+                if dist(fx, fy, mp.x, mp.y) < mp.radius + 1.5:
+                    if mp.id not in threats:
+                        threats[mp.id] = []
+                    threats[mp.id].append((ef.ships, t))
+                    break
     return threats
 
 
@@ -143,19 +140,14 @@ def agent(obs):
         threats = incoming_threats(enemy_fleets, my_planets)
 
         my_total = sum(p.ships for p in my_planets) + sum(f.ships for f in my_fleets)
-        my_prod = sum(p.production for p in my_planets)
         enemy_total = {}
-        enemy_prod = {}
         for p in planets:
             if p.owner >= 0 and p.owner != player:
                 enemy_total[p.owner] = enemy_total.get(p.owner, 0) + p.ships
-                enemy_prod[p.owner] = enemy_prod.get(p.owner, 0) + p.production
         for f in fleets:
             if f.owner != player:
                 enemy_total[f.owner] = enemy_total.get(f.owner, 0) + f.ships
         num_players = max(len(set(p.owner for p in planets if p.owner >= 0) | set(f.owner for f in fleets)), 2)
-        max_enemy_total = max(enemy_total.values()) if enemy_total else 0
-        advantage = my_total / max(max_enemy_total, 1)
 
         moves = []
         available = {p.id: p.ships for p in my_planets}
@@ -223,18 +215,13 @@ def agent(obs):
             static = is_static(init_p[2], init_p[3], t.radius) if init_p else True
             target_info[t.id] = (t, static, init_p)
 
-        max_range = 55 if advantage < 1.5 else 70
         all_options = []
         for mp in my_planets:
             if available.get(mp.id, 0) < 5:
                 continue
-
-            mp_init = init_map.get(mp.id)
-            mp_static = is_static(mp_init[2], mp_init[3], mp.radius) if mp_init else True
-
             for tid, (t, static, init_p) in target_info.items():
                 d = dist(mp.x, mp.y, t.x, t.y)
-                if d > max_range:
+                if d > 55:
                     continue
 
                 tgt_x, tgt_y = t.x, t.y
@@ -242,10 +229,7 @@ def agent(obs):
                     tt_est = travel_turns(d, max(t.ships + 3, 10))
                     for _ in range(3):
                         px, py = predict_pos(init_p[2], init_p[3], t.radius, ang_vel, step + int(tt_est) + 1)
-                        src_x, src_y = mp.x, mp.y
-                        if not mp_static and mp_init:
-                            src_x, src_y = predict_pos(mp_init[2], mp_init[3], mp.radius, ang_vel, step + 1)
-                        d2 = dist(src_x, src_y, px, py)
+                        d2 = dist(mp.x, mp.y, px, py)
                         tt_est = travel_turns(d2, max(t.ships + 3, 10))
                     tgt_x, tgt_y = px, py
                     d = dist(mp.x, mp.y, tgt_x, tgt_y)
@@ -257,22 +241,18 @@ def agent(obs):
 
                 already = en_route.get(t.id, 0)
                 net_garrison = max(0, garrison - already)
-                ships_needed = net_garrison + max(2, int(net_garrison * 0.15))
+                ships_needed = net_garrison + max(2, int(net_garrison * 0.2))
                 if ships_needed <= 0:
                     continue
 
-                prod_val = t.production ** 1.8
-                if t.owner >= 0:
-                    prod_val *= 1.8
-                roi = prod_val / (ships_needed + d / 6.0 + 1.0)
+                prod_val = t.production ** 2
+                roi = prod_val / (ships_needed + d / 5.0 + 1.0)
                 if not static:
-                    roi *= 0.65
+                    roi *= 0.6
                 if t.owner == -1:
                     roi *= 1.5
                     if step < 60:
                         roi *= 1.5
-                if advantage > 2.5 and t.owner >= 0:
-                    roi *= 1.5
                 if num_players > 2 and t.owner >= 0:
                     owner_str = enemy_total.get(t.owner, 0)
                     max_str = max(enemy_total.values()) if enemy_total else 1
@@ -284,46 +264,25 @@ def agent(obs):
         all_options.sort(key=lambda x: x[0], reverse=True)
 
         committed = {}
-        if step < 60:
-            max_targets = max(4, len(my_planets))
-        else:
-            max_targets = max(4, len(my_planets) * 2 // 3)
-        distinct_targets = set()
-
         for roi, mp, target, d, needed, tgt_x, tgt_y in all_options:
             already_committed = committed.get(target.id, 0)
             still_needed = needed - already_committed
             if still_needed <= 0:
                 continue
 
-            if target.id not in distinct_targets and len(distinct_targets) >= max_targets:
-                continue
-
             avail = available.get(mp.id, 0)
-            th = threats.get(mp.id, [])
-            under_threat = any(eta <= 5 for _, eta in th)
-
             if step < 80:
-                reserve = max(mp.production, 2)
-            elif advantage > 2.0:
                 reserve = max(mp.production, 2)
             elif step < 300:
                 reserve = max(mp.production * 2, int(avail * 0.15), 4)
             else:
                 reserve = max(mp.production * 3, int(avail * 0.3), 8)
 
-            if under_threat:
-                reserve = max(reserve, int(avail * 0.5))
-
             can_send = avail - reserve
-            if step < 60 and target.owner == -1:
-                min_fleet = 3
-            else:
-                min_fleet = max(5, int(d * 0.15))
-            if can_send < min_fleet:
+            if can_send < 5:
                 continue
 
-            send = min(can_send, max(still_needed, min_fleet))
+            send = min(can_send, max(still_needed, 5))
             if already_committed == 0 and send < still_needed * 0.4 and still_needed > 10:
                 continue
 
@@ -334,76 +293,6 @@ def agent(obs):
             moves.append([mp.id, angle, send])
             available[mp.id] -= send
             committed[target.id] = already_committed + send
-            distinct_targets.add(target.id)
-
-        # === MOP-UP: idle planets attack nearest cheap target ===
-        for mp in my_planets:
-            avail = available.get(mp.id, 0)
-            if avail < 8:
-                continue
-            reserve = max(mp.production * 2, 5)
-            can_send = avail - reserve
-            if can_send < 5:
-                continue
-            best_target = None
-            best_cost = float('inf')
-            for tid, (t, static, init_p) in target_info.items():
-                d = dist(mp.x, mp.y, t.x, t.y)
-                if d > 40:
-                    continue
-                garrison = t.ships
-                if t.owner >= 0:
-                    tt = travel_turns(d, can_send)
-                    garrison += int(t.production * (tt + 1))
-                already_there = en_route.get(t.id, 0) + committed.get(t.id, 0)
-                needed = max(0, garrison - already_there) + 2
-                if needed <= 0 or needed > can_send:
-                    continue
-                cost = needed + d * 0.5
-                if cost < best_cost:
-                    best_cost = cost
-                    best_target = (t, d, needed)
-            if best_target:
-                t, d, needed = best_target
-                a = safe_angle(mp.x, mp.y, mp.radius, t.x, t.y)
-                if a is not None:
-                    send = min(can_send, max(needed, 5))
-                    moves.append([mp.id, a, send])
-                    available[mp.id] -= send
-                    committed[t.id] = committed.get(t.id, 0) + send
-
-        # === REDISTRIBUTE: idle planets forward ships to front-line ===
-        if step > 40 and len(my_planets) > 3:
-            enemy_cx = 0.0
-            enemy_cy = 0.0
-            enemy_count = 0
-            for p in planets:
-                if p.owner >= 0 and p.owner != player:
-                    enemy_cx += p.x
-                    enemy_cy += p.y
-                    enemy_count += 1
-            if enemy_count > 0:
-                enemy_cx /= enemy_count
-                enemy_cy /= enemy_count
-
-                for mp in my_planets:
-                    avail = available.get(mp.id, 0)
-                    if avail < 15:
-                        continue
-                    my_d_to_enemy = dist(mp.x, mp.y, enemy_cx, enemy_cy)
-                    closer = [o for o in my_planets if o.id != mp.id
-                              and dist(o.x, o.y, enemy_cx, enemy_cy) < my_d_to_enemy - 10]
-                    if not closer:
-                        continue
-                    best_fwd = min(closer, key=lambda o: dist(o.x, o.y, enemy_cx, enemy_cy))
-                    reserve = max(mp.production * 3, 10)
-                    send = avail - reserve
-                    if send < 10:
-                        continue
-                    a = safe_angle(mp.x, mp.y, mp.radius, best_fwd.x, best_fwd.y)
-                    if a is not None:
-                        moves.append([mp.id, a, send])
-                        available[mp.id] -= send
 
         # Validate moves
         result = []
